@@ -3,7 +3,6 @@ package modelgen
 import (
 	"fmt"
 	"go/types"
-	"sort"
 
 	"github.com/99designs/gqlgen/codegen/config"
 	"github.com/99designs/gqlgen/codegen/templates"
@@ -162,20 +161,102 @@ func (m *Plugin) MutateConfig(cfg *config.Config) error {
 					typ = types.NewPointer(typ)
 				}
 
-				tag := `json:"` + field.Name + `"`
-				if !field.Type.NonNull {
-					tag = `json:"` + field.Name + `,omitempty"`
-				}
-
 				it.Fields = append(it.Fields, &Field{
 					Name:        name,
 					Type:        typ,
 					Description: field.Description,
-					Tag:         tag,
+					Tag:         `json:"` + field.Name + `"`,
 				})
 			}
 
 			b.Models = append(b.Models, it)
+
+			func() {
+				suffix := "Ptr"
+				// change all type to interface{} except for ast.Interface, ast.Enum, ast.Union, ast.Object, ast.InputObject, slice, map.
+
+				it := &Object{
+					Description: schemaType.Description,
+					Name:        schemaType.Name + suffix,
+				}
+				for _, implementor := range cfg.Schema.GetImplements(schemaType) {
+					it.Implements = append(it.Implements, implementor.Name)
+				}
+
+				for _, field := range schemaType.Fields {
+					var typ types.Type
+					fieldDef := cfg.Schema.Types[field.Type.Name()]
+
+					if cfg.Models.UserDefined(field.Type.Name()) {
+						var err error
+						typ, err = binder.FindTypeFromName(cfg.Models[field.Type.Name()].Model[0])
+						if err != nil {
+							return
+						}
+						isSlice := field.Type.Elem != nil
+						_, isPtr := typ.(*types.Pointer)
+						_, isMap := typ.(*types.Map)
+						_, isInterface := typ.(*types.Interface)
+
+						if !(isSlice || isPtr || isMap || isInterface) {
+							typ = config.InterfaceType
+						}
+					} else {
+						switch fieldDef.Kind {
+						case ast.Scalar:
+							// no user defined model, referencing a default scalar
+							typ = config.InterfaceType
+
+						case ast.Interface, ast.Union:
+							// no user defined model, referencing a generated interface type
+							typ = types.NewNamed(
+								types.NewTypeName(0, cfg.Model.Pkg(), templates.ToGo(field.Type.Name()), nil),
+								types.NewInterfaceType([]*types.Func{}, []types.Type{}),
+								nil,
+							)
+
+						case ast.Enum:
+							// no user defined model, must reference a generated enum
+							typ = types.NewNamed(
+								types.NewTypeName(0, cfg.Model.Pkg(), templates.ToGo(field.Type.Name()), nil),
+								nil,
+								nil,
+							)
+
+						case ast.Object, ast.InputObject:
+							// no user defined model, must reference a generated struct
+							typ = types.NewNamed(
+								types.NewTypeName(0, cfg.Model.Pkg(), templates.ToGo(field.Type.Name())+suffix, nil),
+								types.NewStruct(nil, nil),
+								nil,
+							)
+
+						default:
+							panic(fmt.Errorf("unknown ast type %s", fieldDef.Kind))
+						}
+					}
+
+					name := field.Name
+					if nameOveride := cfg.Models[schemaType.Name].Fields[field.Name].FieldName; nameOveride != "" {
+						name = nameOveride
+					}
+
+					typ = binder.CopyModifiersFromAst(field.Type, typ)
+
+					if isStruct(typ) && (fieldDef.Kind == ast.Object || fieldDef.Kind == ast.InputObject) {
+						typ = types.NewPointer(typ)
+					}
+
+					it.Fields = append(it.Fields, &Field{
+						Name:        name,
+						Type:        typ,
+						Description: field.Description,
+						Tag:         `json:"` + field.Name + `,omitempty"`,
+					})
+				}
+
+				b.Models = append(b.Models, it)
+			}()
 		case ast.Enum:
 			it := &Enum{
 				Name:        schemaType.Name,
@@ -194,9 +275,9 @@ func (m *Plugin) MutateConfig(cfg *config.Config) error {
 			b.Scalars = append(b.Scalars, schemaType.Name)
 		}
 	}
-	sort.Slice(b.Enums, func(i, j int) bool { return b.Enums[i].Name < b.Enums[j].Name })
-	sort.Slice(b.Models, func(i, j int) bool { return b.Models[i].Name < b.Models[j].Name })
-	sort.Slice(b.Interfaces, func(i, j int) bool { return b.Interfaces[i].Name < b.Interfaces[j].Name })
+	//sort.Slice(b.Enums, func(i, j int) bool { return b.Enums[i].Name < b.Enums[j].Name })
+	//sort.Slice(b.Models, func(i, j int) bool { return b.Models[i].Name < b.Models[j].Name })
+	//sort.Slice(b.Interfaces, func(i, j int) bool { return b.Interfaces[i].Name < b.Interfaces[j].Name })
 
 	for _, it := range b.Enums {
 		cfg.Models.Add(it.Name, cfg.Model.ImportPath()+"."+templates.ToGo(it.Name))
